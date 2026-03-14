@@ -289,8 +289,46 @@ class PlotWorker(QThread):
                 except Exception:
                     pass
                     
-            pythoncom.CoUninitialize()
             self.finished_signal.emit()
+
+
+class CompressWorker(QThread):
+    progress_signal = Signal(int)
+    finished_signal = Signal(str, str) # title, message
+    error_signal = Signal(str)
+
+    def __init__(self, comp_files, out_dir, level):
+        super().__init__()
+        self.comp_files = comp_files
+        self.out_dir = out_dir
+        self.level = level
+
+    def run(self):
+        try:
+            for idx, f in enumerate(self.comp_files):
+                doc = fitz.open(f)
+                bn = os.path.basename(f)
+                out_path = os.path.join(self.out_dir, bn.replace(".pdf", "_comprimido.pdf"))
+                
+                # Opciones de compresión PyMuPDF
+                if self.level == 0:
+                    doc.save(out_path, garbage=1, deflate=True)
+                elif self.level == 1:
+                    doc.save(out_path, garbage=3, deflate=True)
+                else:
+                    doc.save(out_path, garbage=4, deflate=True, clean=True)
+                    
+                doc.close()
+                self.progress_signal.emit(idx + 1)
+                
+            self.finished_signal.emit("Éxito", "Se comprimieron los archivos PDF exitosamente.")
+            
+            try:
+                os.startfile(self.out_dir)
+            except Exception:
+                pass
+        except Exception as e:
+            self.error_signal.emit(f"Ocurrió un error al comprimir:\n\n{str(e)}")
 
 
 class MainWindow(QMainWindow):
@@ -485,7 +523,7 @@ class MainWindow(QMainWindow):
         
         # Sidebar Menu
         self.pdf_sidebar = QListWidget()
-        self.pdf_sidebar.addItems(["Unir PDFs", "Separar PDF", "Marca de Agua", "Proteger (Clave)", "Rotar PDFs"])
+        self.pdf_sidebar.addItems(["Unir PDFs", "Separar PDF", "Marca de Agua", "Proteger (Clave)", "Rotar PDFs", "Comprimir PDF"])
         self.pdf_sidebar.setMinimumWidth(180)
         self.pdf_sidebar.setMaximumWidth(220)
         self.pdf_sidebar.setStyleSheet("font-size: 13px; padding: 5px;")
@@ -519,6 +557,11 @@ class MainWindow(QMainWindow):
         w_rotate = QWidget()
         self.setup_pdf_rotate_ui(w_rotate)
         self.pdf_stack.addWidget(w_rotate)
+        
+        # --- 6. Compress UI ---
+        w_compress = QWidget()
+        self.setup_pdf_compress_ui(w_compress)
+        self.pdf_stack.addWidget(w_compress)
         
         # Connections
         self.pdf_sidebar.currentRowChanged.connect(self.pdf_stack.setCurrentIndex)
@@ -761,6 +804,52 @@ class MainWindow(QMainWindow):
         btn_action.setStyleSheet("background-color: #0277bd; color: white; font-weight: bold; font-size: 14px; padding: 10px;")
         btn_action.clicked.connect(self.pdf_password_action)
         lay_grp.addWidget(btn_action)
+        
+        lay.addWidget(grp)
+        lay.addStretch()
+
+    def setup_pdf_compress_ui(self, widget):
+        lay = QVBoxLayout(widget)
+        grp = QGroupBox("Comprimir / Reducir Peso de PDF")
+        lay_grp = QVBoxLayout(grp)
+        
+        lay_src = QHBoxLayout()
+        lay_src.addWidget(QLabel("Archivo(s) origen:"))
+        self.txt_comp_in = QLineEdit()
+        btn_comp_in = QPushButton("Explorar...")
+        self.comp_files = []
+        btn_comp_in.clicked.connect(lambda: self.select_multi_pdf(self.txt_comp_in, self.comp_files))
+        lay_src.addWidget(self.txt_comp_in)
+        lay_src.addWidget(btn_comp_in)
+        lay_grp.addLayout(lay_src)
+        
+        lay_opt = QHBoxLayout()
+        lay_opt.addWidget(QLabel("Nivel de compresión:"))
+        self.cmb_comp_level = QComboBox()
+        self.cmb_comp_level.addItems(["Básica (Más rápida)", "Media (Recomendada)", "Alta (Mejor compresión)"])
+        self.cmb_comp_level.setCurrentIndex(1)
+        lay_opt.addWidget(self.cmb_comp_level)
+        lay_opt.addStretch()
+        lay_grp.addLayout(lay_opt)
+        
+        lay_dest = QHBoxLayout()
+        lay_dest.addWidget(QLabel("Carpeta Salida:"))
+        self.txt_comp_out = QLineEdit()
+        btn_comp_out = QPushButton("Explorar...")
+        btn_comp_out.clicked.connect(lambda: self.select_output_dir_generic(self.txt_comp_out))
+        lay_dest.addWidget(self.txt_comp_out)
+        lay_dest.addWidget(btn_comp_out)
+        lay_grp.addLayout(lay_dest)
+        
+        btn_action = QPushButton("COMPRIMIR PDFs")
+        btn_action.setStyleSheet("background-color: #0277bd; color: white; font-weight: bold; font-size: 14px; padding: 10px;")
+        btn_action.clicked.connect(self.pdf_compress_action)
+        lay_grp.addWidget(btn_action)
+        
+        self.prog_comp = QProgressBar()
+        self.prog_comp.setValue(0)
+        self.prog_comp.setTextVisible(True)
+        lay_grp.addWidget(self.prog_comp)
         
         lay.addWidget(grp)
         lay.addStretch()
@@ -1302,6 +1391,48 @@ class MainWindow(QMainWindow):
                 pass
         except Exception as e:
             QMessageBox.critical(self, "Error", str(e))
+
+    def pdf_compress_action(self):
+        if not hasattr(self, 'comp_files') or not self.comp_files: 
+            QMessageBox.warning(self, "Atención", "Seleccione al menos un archivo PDF para comprimir.")
+            return
+            
+        out_dir = self.txt_comp_out.text().strip()
+        if not os.path.exists(out_dir): 
+            QMessageBox.warning(self, "Atención", "Seleccione una carpeta de salida válida.")
+            return
+            
+        level = self.cmb_comp_level.currentIndex()
+        
+        total_files = len(self.comp_files)
+        self.prog_comp.setMaximum(total_files)
+        self.prog_comp.setValue(0)
+        # Mostrar porcentaje o cantidad (ej. 1/5)
+        self.prog_comp.setFormat("%v / %m PDFs Procesados  (%p%)")
+        
+        # Deshabilitar UI temporalmente
+        sender = self.sender()
+        if sender: sender.setEnabled(False)
+        
+        self.comp_worker = CompressWorker(self.comp_files, out_dir, level)
+        self.comp_worker.progress_signal.connect(self.prog_comp.setValue)
+        
+        def on_finished(title, msg):
+            if sender: sender.setEnabled(True)
+            self.prog_comp.setValue(0)
+            self.prog_comp.setFormat("%p%")
+            QMessageBox.information(self, title, msg)
+            
+        def on_error(msg):
+            if sender: sender.setEnabled(True)
+            self.prog_comp.setValue(0)
+            self.prog_comp.setFormat("%p%")
+            QMessageBox.critical(self, "Error", msg)
+            
+        self.comp_worker.finished_signal.connect(on_finished)
+        self.comp_worker.error_signal.connect(on_error)
+        
+        self.comp_worker.start()
 
     # --- LÓGICA DE EJECUCIÓN DEL BATCH PLOTTER ---
     def append_log(self, text):
