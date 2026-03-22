@@ -1,4 +1,7 @@
 comtypes
 pywin32
-
+PySide6
 PyPDF2==3.0.1
+qdarkstyle
+PyMuPDF
+reportlab
